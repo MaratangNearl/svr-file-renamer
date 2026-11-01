@@ -7,7 +7,7 @@ import tarfile
 
 PUBLIC_FILES = (
     '.gitignore', '.dockerignore', '.env.example', 'Dockerfile', 'compose.yaml', 'compose.build.yaml',
-    'requirements.txt', 'requirements-dev.txt', 'README.md', 'docs/MAINTAINER.md',
+    'requirements.txt', 'requirements-dev.txt', 'README.md',
     '.github/workflows/ci.yml', '.github/workflows/publish.yml',
     'app/__init__.py', 'app/main.py', 'app/files.py', 'app/store.py', 'app/state.py', 'app/manage.py',
     'app/static/index.html', 'app/static/app.js', 'app/static/style.css',

@@ -1,6 +1,6 @@
 # SVR FILE RENAMER
 
-Ubuntu/NAS의 Docker에서 실행하는 파일명 일괄 변경 웹 서비스입니다. **만든놈 Svrforum yohane**
+Ubuntu/NAS의 Docker에서 실행하는 파일명 일괄 변경 웹 서비스입니다.
 
 한글·일본어·한자가 포함된 파일명에서 광고 문구를 지우거나 원하는 문구로 바꿉니다. 파일 내용과 폴더 이름은 바꾸지 않습니다.
 
@@ -14,7 +14,7 @@ Ubuntu/NAS의 Docker에서 실행하는 파일명 일괄 변경 웹 서비스입
 
 Docker Engine과 `docker compose` 플러그인이 설치된 Ubuntu에서 실행하세요. 소스 빌드나 Python 설치는 필요하지 않습니다. NAS 저장소를 수정할 권한이 있는 일반 사용자로 SSH 접속합니다.
 
-> 제작자가 첫 정식 릴리스를 게시하고 GHCR 이미지를 Public으로 전환한 후 아래 다운로드가 가능합니다. 게시 전 로컬 시험은 [제작자 가이드](docs/MAINTAINER.md)를 이용하세요.
+공개 이미지 `ghcr.io/maratangnearl/svr-file-renamer:latest`를 사용합니다. Linux amd64와 arm64를 지원합니다.
 
 ```bash
 sudo install -d -o "$(id -u)" -g "$(id -g)" /opt/stacks/svr-file-renamer
@@ -71,7 +71,7 @@ Windows/다른 PC 브라우저에서 **http://NAS_IP:18080**으로 접속합니�
 
 이미 `BIND_ADDRESS=127.0.0.1`로 실행 중이면 `.env`에서 `0.0.0.0`으로 바꾼 후 `sudo docker compose up -d --force-recreate`를 실행하세요. LAN 접속이 안 되면 PC와 NAS의 통신 및 방화벽의 TCP 18080 허용 여부를 확인합니다.
 
-공개 이미지는 GitHub 로그인 없이 받을 수 있습니다. `denied`가 나오면 제작자가 GHCR 패키지 공개 여부와 이미지 주소를 확인해야 합니다. [GHCR 공개 이미지 안내](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry)
+공개 이미지는 GitHub 로그인 없이 받을 수 있습니다. `denied`가 나오면 이미지 주소와 레지스트리 접근 상태를 확인하세요. [GHCR 공개 이미지 안내](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry)
 
 ## 사용법
 
@@ -142,4 +142,3 @@ sudo docker compose down
 - 한 번에 작업 하나, Uvicorn worker 하나로 실행합니다. 변경 대상 목록 크기에 비례해 메모리를 사용합니다.
 - 기본 HTTP는 내부망 접속용입니다. 외부 공개 시 HTTPS 리버스 프록시를 사용하고 `COOKIE_SECURE=true`로 설정하세요. 프록시는 원본 Host를 유지해야 합니다.
 
-제작자·기여자를 위한 소스 실행, 테스트, GitHub 업로드와 이미지 릴리스 절차는 [제작자 가이드](docs/MAINTAINER.md)를 참고하세요.

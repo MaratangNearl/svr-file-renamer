@@ -17,6 +17,7 @@ def test_export_contains_only_public_files(tmp_path):
     if (ROOT/'LICENSE').is_file(): expected.add('LICENSE')
     assert files == expected
     assert 'PUTTY_TEST_GUIDE.md' not in files and '.env' not in files
+    assert not any('maintainer' in name.lower() for name in files)
     assert not any('sqlite' in name or '__pycache__' in name or '.venv' in name for name in files)
     with tarfile.open(archive) as bundle:
         assert set(bundle.getnames()) == {'svr-file-renamer/'+name for name in expected}

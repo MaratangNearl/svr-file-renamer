@@ -18,3 +18,5 @@ compose.override.yaml
 release/
 *.tar.gz
 *.backup*
+MAINTAINER_PRIVATE.md
+docs/MAINTAINER.md
