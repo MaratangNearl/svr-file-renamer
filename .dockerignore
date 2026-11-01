@@ -1,0 +1,8 @@
+# Build context includes only runtime source and dependency manifest.
+**
+!app/
+!app/**
+!requirements.txt
+!Dockerfile
+app/**/__pycache__/
+app/**/*.pyc

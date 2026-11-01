@@ -1,0 +1,32 @@
+name: Test
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - run: python -m pytest -q
+      - run: node --check app/static/app.js
+      - run: docker compose --env-file .env.example config --quiet
+      - run: docker build -t svr-file-renamer:ci .
+      - name: Container smoke test
+        run: |
+          mkdir -p /tmp/svr-ci-media /tmp/svr-ci-config
+          sudo chown 1000:1000 /tmp/svr-ci-media /tmp/svr-ci-config
+          docker run -d --name svr-ci -p 127.0.0.1:18080:8080 \
+            -v /tmp/svr-ci-media:/media -v /tmp/svr-ci-config:/config svr-file-renamer:ci
+          trap 'docker logs svr-ci; docker rm -f svr-ci' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail http://127.0.0.1:18080/healthz; then exit 0; fi
+            sleep 1
+          done
+          exit 1

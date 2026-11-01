@@ -1,0 +1,5 @@
+fastapi==0.121.0
+uvicorn==0.38.0
+pyotp==2.9.0
+qrcode[pil]==8.2
+httpx==0.28.1
