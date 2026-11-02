@@ -264,9 +264,112 @@ def test_telegram_authentication_and_initial_setup_gate(client):
     values = {'telegram_token': TELEGRAM_TOKEN, 'telegram_chat_id': '123456789'}
     main.store.update(must_change=1)
     assert client.post('/api/telegram/test', json=values).status_code == 403
+    assert client.post('/api/telegram/chats', json={'telegram_token': TELEGRAM_TOKEN}).status_code == 403
     assert client.put('/api/settings', json={'username': 'admin', **values}).status_code == 403
     assert client.post('/api/logout').status_code == 200
     assert client.post('/api/telegram/test', json=values).status_code == 401
+    assert client.post('/api/telegram/chats', json={'telegram_token': TELEGRAM_TOKEN}).status_code == 401
+
+
+@pytest.mark.parametrize('saved_token', [False, True])
+def test_telegram_chat_discovery_filters_deduplicates_and_does_not_save_or_consume(client, monkeypatch, saved_token):
+    if saved_token:
+        main.store.update(telegram_token=TELEGRAM_TOKEN, telegram_chat_id='555')
+    before = main.store.config()
+    seen = []
+    def fake_post(self, url, **kwargs):
+        method = url.rsplit('/', 1)[-1]
+        seen.append((method, kwargs['json']))
+        assert url.startswith(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/')
+        if method == 'getMe':
+            result = {'id': 123456, 'username': 'renamer_test_bot', 'is_bot': True}
+        else:
+            assert method == 'getUpdates'
+            result = [
+                {'update_id': 1, 'message': {'chat': {'id': 987, 'type': 'private', 'first_name': '홍길동'}, 'text': '/start'}},
+                {'update_id': 2, 'message': {'chat': {'id': 987, 'type': 'private', 'first_name': '홍길동'}, 'text': 'private text'}},
+                {'update_id': 3, 'message': {'chat': {'id': -10099, 'type': 'supergroup', 'title': '<그룹>'}, 'from': {'id': 123}}},
+                {'update_id': 4, 'channel_post': {'chat': {'id': -10088, 'type': 'channel', 'title': '공지'}}},
+                {'update_id': 5, 'my_chat_member': {'chat': {'id': -77, 'type': 'group', 'title': '가족'}}},
+                {'update_id': 6, 'inline_query': {'from': {'id': 333, 'first_name': '수신 대화 아님'}}},
+            ]
+        return main.httpx.Response(200, json={'ok': True, 'result': result})
+    monkeypatch.setattr(main.httpx.Client, 'post', fake_post)
+    result = client.request('POST', '/api/telegram/chats', json={} if saved_token else {'telegram_token': TELEGRAM_TOKEN})
+    assert result.status_code == 200
+    assert result.json() == {'bot_username': 'renamer_test_bot', 'chats': [
+        {'id': '987', 'type': 'private', 'name': '홍길동'},
+        {'id': '-10099', 'type': 'supergroup', 'name': '<그룹>'},
+        {'id': '-10088', 'type': 'channel', 'name': '공지'},
+        {'id': '-77', 'type': 'group', 'name': '가족'},
+    ]}
+    assert seen == [('getMe', {}), ('getUpdates', {'limit': 100, 'timeout': 0})]
+    assert 'private text' not in result.text and TELEGRAM_TOKEN not in result.text
+    assert main.store.config() == before
+
+
+def test_telegram_chat_discovery_no_messages_is_not_an_error(client, monkeypatch):
+    def fake_post(self, url, **kwargs):
+        return main.httpx.Response(200, json={'ok': True, 'result': [] if url.endswith('/getUpdates') else {'username': 'test_bot'}})
+    monkeypatch.setattr(main.httpx.Client, 'post', fake_post)
+    result = client.request('POST', '/api/telegram/chats', json={'telegram_token': TELEGRAM_TOKEN})
+    assert result.status_code == 200 and result.json() == {'bot_username': 'test_bot', 'chats': []}
+
+
+@pytest.mark.parametrize('token', [None, '', 'bad', TELEGRAM_TOKEN + '/getUpdates'])
+def test_telegram_chat_discovery_rejects_missing_or_invalid_token_without_network(client, monkeypatch, token):
+    def unexpected(*args, **kwargs):
+        pytest.fail('Invalid token must not trigger a Telegram request')
+    monkeypatch.setattr(main.httpx.Client, 'post', unexpected)
+    assert client.request('POST', '/api/telegram/chats', json={'telegram_token': token}).status_code == 400
+
+
+def test_telegram_chat_discovery_conflict_does_not_remove_webhook(client, monkeypatch):
+    calls = []
+    def fake_post(self, url, **kwargs):
+        method = url.rsplit('/', 1)[-1]; calls.append(method)
+        return main.httpx.Response(200, json={'ok': True, 'result': {'username': 'test_bot'}}) if method == 'getMe' else main.httpx.Response(409, json={'ok': False, 'description': TELEGRAM_TOKEN})
+    monkeypatch.setattr(main.httpx.Client, 'post', fake_post)
+    result = client.request('POST', '/api/telegram/chats', json={'telegram_token': TELEGRAM_TOKEN})
+    assert result.status_code == 400 and '웹후크' in result.json()['detail']
+    assert TELEGRAM_TOKEN not in result.text and calls == ['getMe', 'getUpdates']
+
+
+@pytest.mark.parametrize('response', [
+    main.httpx.Response(401, json={'ok': False, 'description': TELEGRAM_TOKEN}),
+    main.httpx.Response(200, text=TELEGRAM_TOKEN),
+    main.httpx.Response(200, json={'ok': True, 'result': None}),
+])
+def test_telegram_chat_discovery_errors_hide_token(client, monkeypatch, response):
+    monkeypatch.setattr(main.httpx.Client, 'post', lambda *args, **kwargs: response)
+    result = client.request('POST', '/api/telegram/chats', json={'telegram_token': TELEGRAM_TOKEN})
+    assert result.status_code == 400 and TELEGRAM_TOKEN not in result.text
+
+
+def test_telegram_chat_discovery_network_error_hides_token(client, monkeypatch):
+    def fail(*args, **kwargs):
+        raise main.httpx.ConnectError(TELEGRAM_TOKEN)
+    monkeypatch.setattr(main.httpx.Client, 'post', fail)
+    result = client.request('POST', '/api/telegram/chats', json={'telegram_token': TELEGRAM_TOKEN})
+    assert result.status_code == 400 and TELEGRAM_TOKEN not in result.text
+
+
+@pytest.mark.parametrize('chat_id', ['@public_channel', '@public_group', '987654321'])
+def test_telegram_receiver_is_preserved_for_delivery(client, monkeypatch, chat_id):
+    seen = []
+    def fake_post(self, url, **kwargs):
+        seen.append(kwargs['json']['chat_id'])
+        return main.httpx.Response(200, json={'ok': True, 'result': {}})
+    monkeypatch.setattr(main.httpx.Client, 'post', fake_post)
+    assert client.request('POST', '/api/telegram/test', json={'telegram_token': TELEGRAM_TOKEN, 'telegram_chat_id': chat_id}).status_code == 200
+    assert seen == [chat_id]
+
+
+def test_telegram_wrong_bot_username_explains_how_to_find_receiving_chat(client, monkeypatch):
+    monkeypatch.setattr(main.httpx.Client, 'post', lambda *args, **kwargs: main.httpx.Response(400, json={'ok': False}))
+    result = client.request('POST', '/api/telegram/test', json={'telegram_token': TELEGRAM_TOKEN, 'telegram_chat_id': '@sender_bot'})
+    assert result.status_code == 400
+    assert '/start' in result.text and '채팅 ID 찾기' in result.text and '봇의 @아이디' in result.text
 
 
 @pytest.mark.parametrize('failed_channel', [None, 'discord', 'telegram'])

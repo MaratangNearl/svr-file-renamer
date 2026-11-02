@@ -32,6 +32,7 @@ $('initialSetupForm').onsubmit = handle(async () => {
 });
 async function openSettings() {
   const s = await api('/settings'); $('settingsForm').reset();
+  resetTelegramChats();
   $('settingUser').value = s.username; $('totpSetup').hidden = true;
   $('totpStatus').textContent = s.totp_enabled ? '사용 중' : '사용 안 함';
   $('setupTotp').hidden = s.totp_enabled; $('disableTotp').hidden = !s.totp_enabled;
@@ -53,6 +54,7 @@ for (const dialog of document.querySelectorAll('dialog')) {
 }
 $('settingsDialog').addEventListener('close', () => {
   $('settingsForm').reset(); $('totpKey').value = ''; $('qr').removeAttribute('src'); $('totpSetup').hidden = true;
+  resetTelegramChats();
 });
 $('settingsForm').onsubmit = handle(async () => {
   if ($('newPass').value !== $('confirmPass').value) throw new Error('새 비밀번호 확인이 일치하지 않습니다.');
@@ -90,6 +92,46 @@ $('testTelegram').onclick = handle(async () => {
     toast('테스트 알림을 전송했습니다. Telegram을 확인하세요.');
   } finally { $('testTelegram').disabled = false; }
 });
+let telegramLookup = 0;
+function resetTelegramChats() {
+  telegramLookup++;
+  $('telegramChatsPanel').hidden = true;
+  $('telegramChatChoices').replaceChildren();
+  $('telegramChatChoices').closest('label').hidden = true;
+  $('telegramDiscoveryStatus').textContent = '';
+  $('findTelegramChats').disabled = false;
+}
+$('telegramToken').addEventListener('input', resetTelegramChats);
+$('findTelegramChats').onclick = handle(async () => {
+  resetTelegramChats();
+  const lookup = telegramLookup;
+  $('findTelegramChats').disabled = true;
+  try {
+    const data = await api('/telegram/chats', 'POST', {telegram_token: $('telegramToken').value.trim() || null});
+    if (lookup !== telegramLookup || !$('settingsDialog').open) return;
+    $('telegramChatsPanel').hidden = false;
+    const bot = data.bot_username ? `@${data.bot_username}` : '해당 봇';
+    $('telegramDiscoveryStatus').textContent = data.chats.length
+      ? `${bot}에서 확인한 수신 대화를 선택하세요. 선택 후 연결 테스트와 설정 저장이 필요합니다.`
+      : `${bot}에게 지금 /start를 보내고 채팅 ID 찾기를 다시 누르세요. 응답이 없어도 정상입니다. 그룹은 /start@봇아이디, 채널은 새 게시글을 작성하세요. 다른 프로그램이 메시지를 처리하는 봇이라면 전용 봇을 사용하거나 숫자 ID를 직접 입력하세요.`;
+    const select = $('telegramChatChoices');
+    const placeholder = document.createElement('option'); placeholder.value = ''; placeholder.textContent = '알림을 받을 대화 선택';
+    select.append(placeholder);
+    const types = {private: '개인', group: '그룹', supergroup: '그룹', channel: '채널'};
+    for (const chat of data.chats) {
+      const option = document.createElement('option'); option.value = chat.id;
+      option.textContent = `${chat.name} · ${types[chat.type]} · ${chat.id}`; select.append(option);
+    }
+    select.closest('label').hidden = !data.chats.length;
+  } finally { if (lookup === telegramLookup) $('findTelegramChats').disabled = false; }
+});
+$('telegramChatChoices').onchange = () => {
+  if ($('telegramChatChoices').value) {
+    $('telegramChatId').value = $('telegramChatChoices').value;
+    $('clearTelegram').checked = false;
+    toast('채팅 ID를 입력했습니다. 연결 테스트 후 설정을 저장하세요.');
+  }
+};
 async function loadFolders(path) {
   const data = await api('/folders?path=' + encodeURIComponent(path)); browsePath = data.path;
   $('browsePath').textContent = '/' + browsePath; $('parentFolder').disabled = !browsePath;

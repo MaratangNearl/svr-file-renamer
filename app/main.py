@@ -172,11 +172,15 @@ def webhook_valid(url):
     return bool(re.fullmatch(r'https://(?:discord\.com|discordapp\.com)/api/webhooks/\d+/[\w-]+', url))
 
 
-def validate_telegram(token, chat_id):
+def validate_telegram_token(token):
     if not re.fullmatch(r'[0-9]+:[A-Za-z0-9_-]{20,200}', token):
         raise ValueError('올바른 Telegram 봇 토큰을 입력하세요.')
+
+
+def validate_telegram(token, chat_id):
+    validate_telegram_token(token)
     if not re.fullmatch(r'-?[1-9][0-9]*|@[A-Za-z][A-Za-z0-9_]{4,31}', chat_id):
-        raise ValueError('올바른 Telegram 채팅 ID 또는 @채널이름을 입력하세요.')
+        raise ValueError('수신 대화의 숫자 채팅 ID 또는 @공개그룹·채널이름을 입력하세요. 봇의 @아이디는 수신 대화가 아닙니다.')
 
 
 @app.put('/api/settings')
@@ -286,20 +290,31 @@ def send_discord(url, message):
             raise ValueError(f'Discord 응답 오류: HTTP {result.status_code}')
 
 
+def telegram_request(token, method, payload):
+    validate_telegram_token(token)
+    with httpx.Client(timeout=8, follow_redirects=False, trust_env=False) as client:
+        result = client.post(f'https://api.telegram.org/bot{token}/{method}', json=payload)
+        try:
+            data = result.json()
+        except ValueError:
+            data = None
+        if result.status_code == 200 and isinstance(data, dict) and data.get('ok') is True:
+            return data.get('result')
+        if result.status_code in (401, 404):
+            raise ValueError('Telegram 봇 토큰을 확인하세요. BotFather에서 발급한 토큰을 입력해야 합니다.')
+        if result.status_code == 409:
+            raise ValueError('다른 프로그램의 Telegram 수신 웹후크 또는 메시지 조회와 충돌합니다. 전용 봇을 사용하거나 숫자 채팅 ID를 직접 입력하세요. 기존 웹후크는 변경하지 않았습니다.')
+        if result.status_code == 403:
+            raise ValueError('Telegram 봇 차단 여부와 그룹·채널의 메시지 전송 권한을 확인하세요.')
+        if result.status_code == 400 and method == 'sendMessage':
+            raise ValueError('Telegram 수신 대화와 전송 권한을 확인하세요. 개인 대화는 봇에게 /start를 보낸 뒤 숫자 채팅 ID를 사용하세요. 봇의 @아이디나 개인 @사용자명 대신 채팅 ID 찾기를 이용하세요.')
+        raise ValueError('Telegram 요청에 실패했습니다. 봇 토큰, 채팅 ID, 권한 또는 네트워크를 확인하세요.')
+
+
 def send_telegram(token, chat_id, message):
     validate_telegram(token, chat_id)
-    with httpx.Client(timeout=8, follow_redirects=False, trust_env=False) as client:
-        result = client.post(f'https://api.telegram.org/bot{token}/sendMessage',
-                             json={'chat_id': chat_id, 'text': message[:1900],
-                                   'link_preview_options': {'is_disabled': True}})
-        if result.status_code != 200:
-            raise ValueError(f'Telegram 응답 오류: HTTP {result.status_code}')
-        try:
-            successful = result.json().get('ok') is True
-        except (ValueError, AttributeError):
-            successful = False
-        if not successful:
-            raise ValueError('Telegram 전송 실패: 봇 토큰, 채팅 ID와 메시지 전송 권한을 확인하세요.')
+    telegram_request(token, 'sendMessage', {'chat_id': chat_id, 'text': message[:1900],
+                                          'link_preview_options': {'is_disabled': True}})
 
 
 def notify(event, message):
@@ -336,9 +351,39 @@ def webhook_test(body: WebhookTest, current=Depends(ready)):
     return {'ok': True}
 
 
-class TelegramTest(BaseModel):
+class TelegramToken(BaseModel):
     telegram_token: str | None = Field(default=None, max_length=256)
+
+
+class TelegramTest(TelegramToken):
     telegram_chat_id: str | None = Field(default=None, max_length=64)
+
+
+@app.post('/api/telegram/chats')
+def telegram_chats(body: TelegramToken, current=Depends(ready)):
+    token = body.telegram_token if body.telegram_token is not None else store.config()['telegram_token']
+    try:
+        bot = telegram_request(token, 'getMe', {})
+        # No offset or allowed_updates: do not confirm messages or change reception filters.
+        updates = telegram_request(token, 'getUpdates', {'limit': 100, 'timeout': 0})
+        if not isinstance(bot, dict) or not isinstance(updates, list):
+            raise ValueError('Telegram 채팅 목록을 확인할 수 없습니다. 잠시 후 다시 조회하세요.')
+        chats = {}
+        for update in updates:
+            for key in ('message', 'edited_message', 'channel_post', 'edited_channel_post', 'my_chat_member'):
+                chat = update.get(key, {}).get('chat', {})
+                if chat.get('type') not in {'private', 'group', 'supergroup', 'channel'}:
+                    continue
+                if type(chat.get('id')) is not int:
+                    continue
+                chat_id = str(chat['id'])
+                name = chat.get('title') or ' '.join(filter(None, (chat.get('first_name'), chat.get('last_name'))))
+                chats[chat_id] = {'id': chat_id, 'type': chat['type'],
+                                  'name': name or chat.get('username') or chat_id}
+        return {'bot_username': bot.get('username', ''), 'chats': list(chats.values())}
+    except (ValueError, httpx.HTTPError) as exc:
+        raise HTTPException(400, str(exc) if isinstance(exc, ValueError) else
+                            'Telegram 채팅 조회에 실패했습니다. 봇 토큰 또는 네트워크를 확인하세요.') from exc
 
 
 @app.post('/api/telegram/test')
