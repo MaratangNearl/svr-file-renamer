@@ -155,6 +155,7 @@ def settings(current=Depends(session)):
     config = store.config()
     return {'username': config['username'], 'must_change': bool(config['must_change']),
             'totp_enabled': bool(config['totp']), 'webhook_configured': bool(config['webhook']),
+            'telegram_configured': bool(config['telegram_token'] and config['telegram_chat_id']),
             'events': config['events'].split(',') if config['events'] else []}
 
 
@@ -162,6 +163,8 @@ class Settings(BaseModel):
     username: str = Field(min_length=1, max_length=64)
     password: str = Field(default='', max_length=256)
     webhook: str | None = Field(default=None, max_length=500)
+    telegram_token: str | None = Field(default=None, max_length=256)
+    telegram_chat_id: str | None = Field(default=None, max_length=64)
     events: list[str] | None = None
 
 
@@ -169,11 +172,19 @@ def webhook_valid(url):
     return bool(re.fullmatch(r'https://(?:discord\.com|discordapp\.com)/api/webhooks/\d+/[\w-]+', url))
 
 
+def validate_telegram(token, chat_id):
+    if not re.fullmatch(r'[0-9]+:[A-Za-z0-9_-]{20,200}', token):
+        raise ValueError('올바른 Telegram 봇 토큰을 입력하세요.')
+    if not re.fullmatch(r'-?[1-9][0-9]*|@[A-Za-z][A-Za-z0-9_]{4,31}', chat_id):
+        raise ValueError('올바른 Telegram 채팅 ID 또는 @채널이름을 입력하세요.')
+
+
 @app.put('/api/settings')
 def save_settings(body: Settings, request: Request, current=Depends(session)):
     with auth_lock:
         config = store.config()
-        if config['must_change'] and (body.webhook is not None or body.events is not None):
+        if config['must_change'] and any(value is not None for value in
+                (body.webhook, body.events, body.telegram_token, body.telegram_chat_id)):
             raise HTTPException(403, '먼저 아이디와 비밀번호를 설정하세요.')
         if config['must_change'] and not body.password:
             raise HTTPException(400, '새 비밀번호를 입력하세요.')
@@ -190,6 +201,14 @@ def save_settings(body: Settings, request: Request, current=Depends(session)):
             raise HTTPException(400, '아이디를 입력하세요.')
         if body.webhook is not None:
             updates['webhook'] = body.webhook
+        token = body.telegram_token if body.telegram_token is not None else config['telegram_token']
+        chat_id = body.telegram_chat_id if body.telegram_chat_id is not None else config['telegram_chat_id']
+        if token or chat_id:
+            try:
+                validate_telegram(token, chat_id)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+        updates.update(telegram_token=token, telegram_chat_id=chat_id)
         if body.password:
             updates.update(password=password_hash(body.password), must_change=0)
         store.update(**updates)
@@ -267,14 +286,40 @@ def send_discord(url, message):
             raise ValueError(f'Discord 응답 오류: HTTP {result.status_code}')
 
 
+def send_telegram(token, chat_id, message):
+    validate_telegram(token, chat_id)
+    with httpx.Client(timeout=8, follow_redirects=False, trust_env=False) as client:
+        result = client.post(f'https://api.telegram.org/bot{token}/sendMessage',
+                             json={'chat_id': chat_id, 'text': message[:1900],
+                                   'link_preview_options': {'is_disabled': True}})
+        if result.status_code != 200:
+            raise ValueError(f'Telegram 응답 오류: HTTP {result.status_code}')
+        try:
+            successful = result.json().get('ok') is True
+        except (ValueError, AttributeError):
+            successful = False
+        if not successful:
+            raise ValueError('Telegram 전송 실패: 봇 토큰, 채팅 ID와 메시지 전송 권한을 확인하세요.')
+
+
 def notify(event, message):
     config = store.config()
-    if config['webhook'] and event in config['events'].split(','):
-        def deliver():
+    if event not in config['events'].split(','):
+        return
+
+    def deliver():
+        if config['webhook']:
             try:
                 send_discord(config['webhook'], message)
             except Exception:
                 store.log('error', 'Discord 알림 전송 실패 (주소, 권한 또는 네트워크를 확인하세요.)')
+        if config['telegram_token'] and config['telegram_chat_id']:
+            try:
+                send_telegram(config['telegram_token'], config['telegram_chat_id'], message)
+            except Exception:
+                store.log('error', 'Telegram 알림 전송 실패 (봇 토큰, 채팅 ID, 권한 또는 네트워크를 확인하세요.)')
+
+    if config['webhook'] or (config['telegram_token'] and config['telegram_chat_id']):
         notifications.submit(deliver)
 
 
@@ -288,6 +333,24 @@ def webhook_test(body: WebhookTest, current=Depends(ready)):
         send_discord(body.webhook if body.webhook is not None else store.config()['webhook'], '✅ SVR FILE RENAMER: Discord 연결 테스트 성공')
     except (ValueError, httpx.HTTPError) as exc:
         raise HTTPException(400, str(exc) if isinstance(exc, ValueError) else 'Discord 연결에 실패했습니다.') from exc
+    return {'ok': True}
+
+
+class TelegramTest(BaseModel):
+    telegram_token: str | None = Field(default=None, max_length=256)
+    telegram_chat_id: str | None = Field(default=None, max_length=64)
+
+
+@app.post('/api/telegram/test')
+def telegram_test(body: TelegramTest, current=Depends(ready)):
+    config = store.config()
+    try:
+        send_telegram(body.telegram_token if body.telegram_token is not None else config['telegram_token'],
+                      body.telegram_chat_id if body.telegram_chat_id is not None else config['telegram_chat_id'],
+                      '✅ SVR FILE RENAMER: Telegram 연결 테스트 성공')
+    except (ValueError, httpx.HTTPError) as exc:
+        raise HTTPException(400, str(exc) if isinstance(exc, ValueError) else
+                            'Telegram 연결에 실패했습니다. 봇 토큰, 채팅 ID, 권한 또는 네트워크를 확인하세요.') from exc
     return {'ok': True}
 
 

@@ -29,7 +29,7 @@ def client(service):
     with main.auth_lock:
         main.sessions.clear()
         main.failures.clear()
-    main.store.update(username='admin', password=password_hash('test-password'), must_change=0, totp='', last_step=-1, webhook='', events='start,complete,error')
+    main.store.update(username='admin', password=password_hash('test-password'), must_change=0, totp='', last_step=-1, webhook='', telegram_token='', telegram_chat_id='', events='start,complete,error')
     client.cookies.clear()
     assert client.post('/api/login', json={'username':'admin', 'password':'test-password'}).status_code == 200
     return client
@@ -189,6 +189,117 @@ def test_webhook_preferences_and_secrecy(client):
     s=client.get('/api/settings').json()
     assert s['events']==['error'] and s['webhook_configured'] is True
     assert 'secret' not in str(s) and 'password' not in s
+
+
+TELEGRAM_TOKEN = '123456:TEST_ONLY_token_123456789012345'
+
+
+def test_telegram_test_delivery_and_no_automatic_save(client, monkeypatch):
+    seen = []
+    def fake_post(self, url, **kwargs):
+        seen.append((url, kwargs))
+        return main.httpx.Response(200, json={'ok': True, 'result': {}})
+    monkeypatch.setattr(main.httpx.Client, 'post', fake_post)
+    assert client.request('POST', '/api/telegram/test', json={
+        'telegram_token': TELEGRAM_TOKEN, 'telegram_chat_id': '-1001234567890'}).status_code == 200
+    assert seen[0][0] == f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage'
+    payload = seen[0][1]['json']
+    assert payload['chat_id'] == '-1001234567890' and '연결 테스트 성공' in payload['text']
+    assert 'parse_mode' not in payload and payload['link_preview_options']['is_disabled']
+    assert main.store.config()['telegram_token'] == ''
+
+
+def test_telegram_settings_preserve_replace_delete_and_secrecy(client, monkeypatch):
+    values = {'username': 'admin', 'telegram_token': TELEGRAM_TOKEN, 'telegram_chat_id': '123456789'}
+    assert client.put('/api/settings', json=values).status_code == 200
+    assert client.put('/api/settings', json={'username': 'admin', 'events': ['error']}).status_code == 200
+    assert main.store.config()['telegram_token'] == TELEGRAM_TOKEN
+    s = client.get('/api/settings').json()
+    assert s['telegram_configured'] and s['events'] == ['error']
+    assert TELEGRAM_TOKEN not in str(s) and 'telegram_token' not in s
+    seen = []
+    monkeypatch.setattr(main, 'send_telegram', lambda *args: seen.append(args))
+    assert client.post('/api/telegram/test', json={}).status_code == 200
+    assert seen[0][:2] == (TELEGRAM_TOKEN, '123456789')
+    assert client.put('/api/settings', json={'username': 'admin', 'telegram_chat_id': '@my_channel'}).status_code == 200
+    assert main.store.config()['telegram_chat_id'] == '@my_channel'
+    assert client.put('/api/settings', json={'username': 'admin', 'telegram_token': '', 'telegram_chat_id': ''}).status_code == 200
+    assert not client.get('/api/settings').json()['telegram_configured']
+    assert main.store.config()['telegram_token'] == main.store.config()['telegram_chat_id'] == ''
+
+
+@pytest.mark.parametrize(('token', 'chat_id'), [
+    ('bad', '123'), (TELEGRAM_TOKEN + '/getMe', '123'),
+    (TELEGRAM_TOKEN, 'https://evil.example'), (TELEGRAM_TOKEN, ''), ('', '123'),
+])
+def test_telegram_invalid_settings_and_test_rejected(client, token, chat_id):
+    values = {'telegram_token': token, 'telegram_chat_id': chat_id}
+    assert client.put('/api/settings', json={'username': 'admin', **values}).status_code == 400
+    assert client.post('/api/telegram/test', json=values).status_code == 400
+    assert main.store.config()['telegram_token'] == ''
+
+
+@pytest.mark.parametrize('response', [
+    main.httpx.Response(403, json={'ok': False, 'description': TELEGRAM_TOKEN}),
+    main.httpx.Response(200, json={'ok': False, 'description': TELEGRAM_TOKEN}),
+    main.httpx.Response(200, text=TELEGRAM_TOKEN),
+])
+def test_telegram_api_failures_hide_response_secrets(client, monkeypatch, response):
+    monkeypatch.setattr(main.httpx.Client, 'post', lambda *args, **kwargs: response)
+    result = client.request('POST', '/api/telegram/test', json={
+        'telegram_token': TELEGRAM_TOKEN, 'telegram_chat_id': '123456789'})
+    assert result.status_code == 400 and TELEGRAM_TOKEN not in result.text
+
+
+def test_telegram_connection_error_hides_token(client, monkeypatch):
+    def fail(*args, **kwargs):
+        raise main.httpx.ConnectError(f'failed: {TELEGRAM_TOKEN}')
+    monkeypatch.setattr(main.httpx.Client, 'post', fail)
+    result = client.request('POST', '/api/telegram/test', json={
+        'telegram_token': TELEGRAM_TOKEN, 'telegram_chat_id': '123456789'})
+    assert result.status_code == 400 and TELEGRAM_TOKEN not in result.text
+
+
+def test_telegram_authentication_and_initial_setup_gate(client):
+    values = {'telegram_token': TELEGRAM_TOKEN, 'telegram_chat_id': '123456789'}
+    main.store.update(must_change=1)
+    assert client.post('/api/telegram/test', json=values).status_code == 403
+    assert client.put('/api/settings', json={'username': 'admin', **values}).status_code == 403
+    assert client.post('/api/logout').status_code == 200
+    assert client.post('/api/telegram/test', json=values).status_code == 401
+
+
+@pytest.mark.parametrize('failed_channel', [None, 'discord', 'telegram'])
+def test_both_notification_channels_filter_events_and_isolate_failures(client, monkeypatch, failed_channel):
+    main.store.update(webhook='https://discord.com/api/webhooks/123/token',
+                      telegram_token=TELEGRAM_TOKEN, telegram_chat_id='123456789', events='error')
+    seen = []
+    def deliver(channel, message):
+        seen.append((channel, message))
+        if channel == failed_channel:
+            raise ValueError(TELEGRAM_TOKEN)
+    monkeypatch.setattr(main, 'send_discord', lambda url, message: deliver('discord', message))
+    monkeypatch.setattr(main, 'send_telegram', lambda token, chat_id, message: deliver('telegram', message))
+    main.notify('start', 'skip'); main.notify('complete', 'skip'); main.notify('error', '⚠️ 한글 <파일>')
+    main.notifications.submit(lambda: None).result(timeout=3)
+    assert seen == [('discord', '⚠️ 한글 <파일>'), ('telegram', '⚠️ 한글 <파일>')]
+    logs = client.get('/api/logs').json()
+    assert TELEGRAM_TOKEN not in str(logs)
+    if failed_channel:
+        assert any(f'{failed_channel.title()} 알림 전송 실패' in row['message'] for row in logs)
+
+
+def test_job_telegram_only_uses_same_start_and_result_messages(client, service, monkeypatch):
+    _, root = service
+    folder = root / 'telegram-job'; folder.mkdir(); (folder / 'ad_영화.mp4').touch()
+    main.store.update(telegram_token=TELEGRAM_TOKEN, telegram_chat_id='123456789')
+    seen = []
+    monkeypatch.setattr(main, 'send_telegram', lambda token, chat_id, message: seen.append(message))
+    assert client.post('/api/jobs', json={'folder': folder.name, 'find': 'ad_'}).status_code == 200
+    assert wait_job(client)['renamed'] == 1
+    main.notifications.submit(lambda: None).result(timeout=3)
+    assert len(seen) == 2 and '작업 시작' in seen[0] and '작업 완료' in seen[1]
+    assert (folder / '영화.mp4').exists()
 
 
 def test_static_security_headers(client):

@@ -36,6 +36,7 @@ async function openSettings() {
   $('totpStatus').textContent = s.totp_enabled ? '사용 중' : '사용 안 함';
   $('setupTotp').hidden = s.totp_enabled; $('disableTotp').hidden = !s.totp_enabled;
   $('webhookStatus').textContent = s.webhook_configured ? '웹후크 저장됨 · 비워 두면 기존 주소 유지' : '저장된 웹후크 없음';
+  $('telegramStatus').textContent = s.telegram_configured ? 'Telegram 설정 저장됨 · 비워 두면 기존 값 유지' : '저장된 Telegram 설정 없음';
   for (const e of document.querySelectorAll('[name=event]')) e.checked = s.events.includes(e.value);
   if (!$('settingsDialog').open) $('settingsDialog').showModal();
 }
@@ -57,6 +58,8 @@ $('settingsForm').onsubmit = handle(async () => {
   if ($('newPass').value !== $('confirmPass').value) throw new Error('새 비밀번호 확인이 일치하지 않습니다.');
   await api('/settings', 'PUT', {username: $('settingUser').value, password: $('newPass').value,
     webhook: $('clearWebhook').checked ? '' : ($('webhook').value.trim() || null),
+    telegram_token: $('clearTelegram').checked ? '' : ($('telegramToken').value.trim() || null),
+    telegram_chat_id: $('clearTelegram').checked ? '' : ($('telegramChatId').value.trim() || null),
     events: [...document.querySelectorAll('[name=event]:checked')].map(e => e.value)});
   $('settingsDialog').close(); toast('설정을 저장했습니다.'); await signedIn();
 });
@@ -78,6 +81,14 @@ $('testWebhook').onclick = handle(async () => {
   $('testWebhook').disabled = true;
   try { await api('/webhook/test', 'POST', {webhook: $('webhook').value.trim() || null}); toast('테스트 알림을 전송했습니다. Discord를 확인하세요.'); }
   finally { $('testWebhook').disabled = false; }
+});
+$('testTelegram').onclick = handle(async () => {
+  $('testTelegram').disabled = true;
+  try {
+    await api('/telegram/test', 'POST', {telegram_token: $('telegramToken').value.trim() || null,
+      telegram_chat_id: $('telegramChatId').value.trim() || null});
+    toast('테스트 알림을 전송했습니다. Telegram을 확인하세요.');
+  } finally { $('testTelegram').disabled = false; }
 });
 async function loadFolders(path) {
   const data = await api('/folders?path=' + encodeURIComponent(path)); browsePath = data.path;

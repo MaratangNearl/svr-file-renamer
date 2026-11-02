@@ -37,8 +37,12 @@ class Store:
           CREATE TABLE IF NOT EXISTS logs (id INTEGER PRIMARY KEY AUTOINCREMENT, time TEXT DEFAULT
             (strftime('%Y-%m-%dT%H:%M:%SZ','now')), level TEXT, message TEXT);
         ''')
+        columns = {row['name'] for row in self.db.execute('PRAGMA table_info(config)')}
+        for name in ('telegram_token', 'telegram_chat_id'):
+            if name not in columns:
+                self.db.execute(f"ALTER TABLE config ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
         if not self.db.execute('SELECT id FROM config').fetchone():
-            self.db.execute('INSERT INTO config VALUES (1,?,?,1,\'\',-1,\'\',?)',
+            self.db.execute('INSERT INTO config (id,username,password,must_change,totp,last_step,webhook,events) VALUES (1,?,?,1,\'\',-1,\'\',?)',
                             ('admin', password_hash('admin'), 'start,complete,error'))
         self.db.commit()
 
@@ -68,7 +72,7 @@ class Store:
         with self.lock, self.db:
             self.db.execute("UPDATE config SET username='admin', password=?, must_change=1, totp='', last_step=-1 WHERE id=1", (hashed,))
             if all_settings:
-                self.db.execute("UPDATE config SET webhook='', events='start,complete,error' WHERE id=1")
+                self.db.execute("UPDATE config SET webhook='', telegram_token='', telegram_chat_id='', events='start,complete,error' WHERE id=1")
                 self.db.execute('DELETE FROM logs')
                 self.db.execute('DELETE FROM changes')
                 self.db.execute('DELETE FROM jobs')

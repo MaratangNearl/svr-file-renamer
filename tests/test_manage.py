@@ -21,13 +21,15 @@ def test_reset_admin_removes_credentials_and_totp_preserves_preferences(tmp_path
     folder=tmp_path/'config'
     db=Store(str(folder))
     db.update(username='olduser',password=password_hash('old-password'),must_change=0,totp='OLDKEY',last_step=123,
-              webhook='https://discord.com/api/webhooks/123/secret',events='error')
+              webhook='https://discord.com/api/webhooks/123/secret',events='error',
+              telegram_token='123456:TEST_ONLY_token_123456789012345',telegram_chat_id='-1001234567890')
     db.log('info','old log');db.db.close()
     assert run_reset(folder,'reset-admin','--yes').returncode==0
     db=Store(str(folder));c=db.config()
     assert c['username']=='admin' and password_matches('admin',c['password'])
     assert c['must_change']==1 and c['totp']=='' and c['last_step']==-1
     assert c['events']=='error' and c['webhook'].endswith('/secret')
+    assert c['telegram_token']=='123456:TEST_ONLY_token_123456789012345' and c['telegram_chat_id']=='-1001234567890'
     assert any(row['message']=='old log' for row in db.logs())
     db.db.close()
 
@@ -37,7 +39,8 @@ def test_reset_all_clears_state_but_does_not_touch_media(tmp_path):
     sample=media/'한글_日本語_漢字.mp4';sample.write_bytes(b'unchanged')
     db=Store(str(folder))
     db.update(username='olduser',password=password_hash('old-password'),must_change=0,totp='OLDKEY',last_step=123,
-              webhook='https://discord.com/api/webhooks/123/secret',events='error')
+              webhook='https://discord.com/api/webhooks/123/secret',events='error',
+              telegram_token='123456:TEST_ONLY_token_123456789012345',telegram_chat_id='-1001234567890')
     db.log('info','old log');db.db.close()
     result=subprocess.run([sys.executable,'-m','app.manage','reset-all','--yes'],
         env=dict(os.environ,APP_DATA=str(folder),MEDIA_ROOT=str(media)),text=True,capture_output=True)
@@ -46,6 +49,7 @@ def test_reset_all_clears_state_but_does_not_touch_media(tmp_path):
     assert c['username']=='admin' and password_matches('admin',c['password'])
     assert c['must_change']==1 and c['totp']=='' and c['last_step']==-1 and c['webhook']==''
     assert c['events']=='start,complete,error'
+    assert c['telegram_token']==c['telegram_chat_id']==''
     assert [row['message'] for row in db.logs()]==['전체 설정 초기화']
     assert list(media.iterdir())==[sample] and sample.read_bytes()==b'unchanged'
     db.db.close()
@@ -85,5 +89,9 @@ def test_upgrade_creates_changes_tables_preserving_existing_config(tmp_path):
     db=Store(str(folder));config=db.config()
     assert config['username']=='existing' and config['password']==hashed and config['totp']=='EXISTINGKEY'
     assert config['webhook'].endswith('/token') and config['events']=='error'
+    assert config['telegram_token']==config['telegram_chat_id']==''
+    db.db.close()
+    db=Store(str(folder));config=db.config()
+    assert config['password']==hashed and config['telegram_token']==config['telegram_chat_id']==''
     assert db.changes()=={'job':None,'total':0,'rows':[]}
     db.db.close()

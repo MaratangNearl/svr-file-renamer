@@ -13,7 +13,7 @@ def main(argv=None):
     parser.add_argument('--yes', action='store_true', help='초기화를 명시적으로 승인')
     args = parser.parse_args(argv)
     if not args.yes:
-        parser.error('계정/TOTP를 초기화하려면 --yes가 필요합니다. reset-all은 Discord 설정과 기존 로그도 초기화합니다.')
+        parser.error('계정/TOTP를 초기화하려면 --yes가 필요합니다. reset-all은 Discord/Telegram 설정과 기존 로그도 초기화합니다.')
     try:
         with state_lock(os.environ.get('APP_DATA', '/config')):
             store = Store(os.environ.get('APP_DATA', '/config'))
