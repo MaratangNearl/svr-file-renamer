@@ -38,6 +38,7 @@ async function openSettings() {
   $('setupTotp').hidden = s.totp_enabled; $('disableTotp').hidden = !s.totp_enabled;
   $('webhookStatus').textContent = s.webhook_configured ? '웹후크 저장됨 · 비워 두면 기존 주소 유지' : '저장된 웹후크 없음';
   $('telegramStatus').textContent = s.telegram_configured ? 'Telegram 설정 저장됨 · 비워 두면 기존 값 유지' : '저장된 Telegram 설정 없음';
+  $('telegramCommands').checked = s.telegram_commands;
   for (const e of document.querySelectorAll('[name=event]')) e.checked = s.events.includes(e.value);
   if (!$('settingsDialog').open) $('settingsDialog').showModal();
 }
@@ -62,6 +63,7 @@ $('settingsForm').onsubmit = handle(async () => {
     webhook: $('clearWebhook').checked ? '' : ($('webhook').value.trim() || null),
     telegram_token: $('clearTelegram').checked ? '' : ($('telegramToken').value.trim() || null),
     telegram_chat_id: $('clearTelegram').checked ? '' : ($('telegramChatId').value.trim() || null),
+    telegram_commands: !$('clearTelegram').checked && $('telegramCommands').checked,
     events: [...document.querySelectorAll('[name=event]:checked')].map(e => e.value)});
   $('settingsDialog').close(); toast('설정을 저장했습니다.'); await signedIn();
 });

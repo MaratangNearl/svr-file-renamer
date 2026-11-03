@@ -9,9 +9,9 @@ PUBLIC_FILES = (
     '.gitignore', '.dockerignore', '.env.example', 'Dockerfile', 'compose.yaml', 'compose.build.yaml',
     'requirements.txt', 'requirements-dev.txt', 'README.md',
     '.github/workflows/ci.yml', '.github/workflows/publish.yml',
-    'app/__init__.py', 'app/main.py', 'app/files.py', 'app/store.py', 'app/state.py', 'app/manage.py',
+    'app/__init__.py', 'app/main.py', 'app/files.py', 'app/store.py', 'app/state.py', 'app/manage.py', 'app/telegram_bot.py',
     'app/static/index.html', 'app/static/app.js', 'app/static/style.css',
-    'tests/test_service.py', 'tests/test_manage.py', 'tests/test_release.py', 'scripts/prepare-release.py',
+    'tests/test_service.py', 'tests/test_manage.py', 'tests/test_release.py', 'tests/test_telegram_bot.py', 'scripts/prepare-release.py',
 )
 
 

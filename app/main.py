@@ -21,11 +21,13 @@ from pydantic import BaseModel, Field
 from .files import Volume, parts
 from .state import state_lock
 from .store import Store, password_hash, password_matches
+from .telegram_bot import TelegramBot, identity as telegram_identity
 
 DATA = os.environ.get('APP_DATA', '/config')
 ROOT = os.environ.get('MEDIA_ROOT', '/media')
 store = None
 volume = None
+telegram_bot = None
 sessions = {}
 failures = {}
 auth_lock = threading.RLock()
@@ -40,15 +42,18 @@ ACTIVE = {'scanning', 'running', 'stopping'}
 
 @asynccontextmanager
 async def lifespan(app):
-    global store, volume
+    global store, volume, telegram_bot
     with state_lock(DATA):
         store = Store(DATA)
         store.interrupt_jobs()
         volume = Volume(ROOT)
         store.log('info', '서비스 시작')
+        telegram_bot = TelegramBot(store.config, telegram_request, validate_telegram_job, start_telegram_job, store.log)
+        telegram_bot.start()
         try:
             yield
         finally:
+            telegram_bot.close()
             stop.set()
             executor.shutdown(wait=True)
             notifications.shutdown(wait=True)
@@ -156,6 +161,7 @@ def settings(current=Depends(session)):
     return {'username': config['username'], 'must_change': bool(config['must_change']),
             'totp_enabled': bool(config['totp']), 'webhook_configured': bool(config['webhook']),
             'telegram_configured': bool(config['telegram_token'] and config['telegram_chat_id']),
+            'telegram_commands': bool(config['telegram_commands']),
             'events': config['events'].split(',') if config['events'] else []}
 
 
@@ -165,6 +171,7 @@ class Settings(BaseModel):
     webhook: str | None = Field(default=None, max_length=500)
     telegram_token: str | None = Field(default=None, max_length=256)
     telegram_chat_id: str | None = Field(default=None, max_length=64)
+    telegram_commands: bool | None = None
     events: list[str] | None = None
 
 
@@ -188,7 +195,7 @@ def save_settings(body: Settings, request: Request, current=Depends(session)):
     with auth_lock:
         config = store.config()
         if config['must_change'] and any(value is not None for value in
-                (body.webhook, body.events, body.telegram_token, body.telegram_chat_id)):
+                (body.webhook, body.events, body.telegram_token, body.telegram_chat_id, body.telegram_commands)):
             raise HTTPException(403, '먼저 아이디와 비밀번호를 설정하세요.')
         if config['must_change'] and not body.password:
             raise HTTPException(400, '새 비밀번호를 입력하세요.')
@@ -213,6 +220,12 @@ def save_settings(body: Settings, request: Request, current=Depends(session)):
             except ValueError as exc:
                 raise HTTPException(400, str(exc)) from exc
         updates.update(telegram_token=token, telegram_chat_id=chat_id)
+        commands = body.telegram_commands if body.telegram_commands is not None else bool(config['telegram_commands'])
+        if body.telegram_token == '' and body.telegram_chat_id == '':
+            commands = False
+        if commands and (not token or not re.fullmatch(r'[1-9][0-9]*', chat_id)):
+            raise HTTPException(400, '봇 명령은 등록된 개인 채팅의 양수 숫자 ID에서만 사용할 수 있습니다. 개인 대화의 채팅 ID를 설정하세요.')
+        updates['telegram_commands'] = int(commands)
         if body.password:
             updates.update(password=password_hash(body.password), must_change=0)
         store.update(**updates)
@@ -362,6 +375,9 @@ class TelegramTest(TelegramToken):
 @app.post('/api/telegram/chats')
 def telegram_chats(body: TelegramToken, current=Depends(ready)):
     token = body.telegram_token if body.telegram_token is not None else store.config()['telegram_token']
+    cached = telegram_bot.discovery(token) if telegram_bot else None
+    if cached is not None:
+        return cached
     try:
         bot = telegram_request(token, 'getMe', {})
         # No offset or allowed_updates: do not confirm messages or change reception filters.
@@ -493,8 +509,7 @@ class RenameJob(BaseModel):
     replace: str = Field(default='', max_length=255)
 
 
-@app.post('/api/jobs')
-def start_job(body: RenameJob, current=Depends(ready)):
+def validate_job(body):
     # Strip copy/paste artifacts at the edges; preserve ordinary spaces and
     # meaningful Unicode inside the literal search/replacement strings.
     body.find = body.find.strip('\u200b\ufeff\u2060')
@@ -511,6 +526,10 @@ def start_job(body: RenameJob, current=Depends(ready)):
             pass
     except (OSError, ValueError) as exc:
         raise HTTPException(400, '폴더 경로 또는 접근 권한을 확인하세요.') from exc
+    return body
+
+
+def launch_job(body):
     with job_lock:
         if job['state'] in ACTIVE:
             raise HTTPException(409, '이미 실행 중인 작업이 있습니다.')
@@ -520,6 +539,32 @@ def start_job(body: RenameJob, current=Depends(ready)):
         store.begin_job(job['id'], body.folder)
         executor.submit(run_job, body, job['id'])
         return dict(job)
+
+
+@app.post('/api/jobs')
+def start_job(body: RenameJob, current=Depends(ready)):
+    return launch_job(validate_job(body))
+
+
+def validate_telegram_job(values):
+    try:
+        return validate_job(RenameJob(**values)).model_dump()
+    except HTTPException as exc:
+        raise ValueError(exc.detail) from exc
+    except ValueError as exc:
+        raise ValueError('문구 또는 폴더 경로의 길이를 확인하세요.') from exc
+
+
+def start_telegram_job(values, expected_identity):
+    with auth_lock:
+        if expected_identity is None or telegram_identity(store.config()) != expected_identity:
+            raise ValueError('봇 설정이 변경되었습니다. 관리자 설정을 확인하세요.')
+        try:
+            result = launch_job(validate_job(RenameJob(**values)))
+        except HTTPException as exc:
+            raise ValueError(exc.detail) from exc
+        store.log('info', 'Telegram 대화에서 확인한 작업 시작')
+        return result
 
 
 @app.get('/api/jobs')

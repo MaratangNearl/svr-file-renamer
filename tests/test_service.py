@@ -24,15 +24,17 @@ def service(tmp_path_factory):
 
 
 @pytest.fixture
-def client(service):
+def client(service, monkeypatch):
     client, _ = service
+    monkeypatch.setattr(main.telegram_bot, 'poll_once', lambda: None)
     with main.auth_lock:
         main.sessions.clear()
         main.failures.clear()
-    main.store.update(username='admin', password=password_hash('test-password'), must_change=0, totp='', last_step=-1, webhook='', telegram_token='', telegram_chat_id='', events='start,complete,error')
+    main.store.update(username='admin', password=password_hash('test-password'), must_change=0, totp='', last_step=-1, webhook='', telegram_token='', telegram_chat_id='', telegram_commands=0, events='start,complete,error')
     client.cookies.clear()
     assert client.post('/api/login', json={'username':'admin', 'password':'test-password'}).status_code == 200
-    return client
+    yield client
+    main.store.update(telegram_commands=0)
 
 
 def wait_job(client):
@@ -370,6 +372,65 @@ def test_telegram_wrong_bot_username_explains_how_to_find_receiving_chat(client,
     result = client.request('POST', '/api/telegram/test', json={'telegram_token': TELEGRAM_TOKEN, 'telegram_chat_id': '@sender_bot'})
     assert result.status_code == 400
     assert '/start' in result.text and '채팅 ID 찾기' in result.text and '봇의 @아이디' in result.text
+
+
+@pytest.mark.parametrize('chat_id', ['-1001234567890', '@public_channel', ''])
+def test_telegram_command_settings_require_private_chat(client, chat_id):
+    result = client.put('/api/settings', json={'username': 'admin', 'telegram_token': TELEGRAM_TOKEN,
+        'telegram_chat_id': chat_id, 'telegram_commands': True})
+    assert result.status_code == 400 and not main.store.config()['telegram_commands']
+
+
+def test_telegram_command_setting_can_enable_and_clear_credentials(client):
+    assert client.put('/api/settings', json={'username': 'admin', 'telegram_token': TELEGRAM_TOKEN,
+        'telegram_chat_id': '42', 'telegram_commands': True}).status_code == 200
+    assert client.get('/api/settings').json()['telegram_commands'] is True
+    assert client.put('/api/settings', json={'username': 'admin', 'telegram_token': '', 'telegram_chat_id': ''}).status_code == 200
+    assert client.get('/api/settings').json()['telegram_commands'] is False
+
+
+def test_command_mode_chat_discovery_uses_polling_cache_without_another_consumer(client, monkeypatch):
+    main.store.update(telegram_token=TELEGRAM_TOKEN, telegram_chat_id='42', telegram_commands=1)
+    monkeypatch.setattr(main.telegram_bot, 'context', main.telegram_identity(main.store.config()))
+    monkeypatch.setattr(main.telegram_bot, 'username', 'test_bot')
+    monkeypatch.setattr(main.telegram_bot, 'chats', {'42': {'id': '42', 'type': 'private', 'name': '나'}})
+    def unexpected(*args, **kwargs): pytest.fail('Discovery must not poll while command consumer is active')
+    monkeypatch.setattr(main.httpx.Client, 'post', unexpected)
+    result = client.request('POST', '/api/telegram/chats', json={})
+    assert result.status_code == 200 and result.json()['chats'][0]['id'] == '42'
+
+
+def test_telegram_confirmed_conversation_renames_only_selected_folder(client, service):
+    from app.telegram_bot import TelegramBot
+    _, root = service
+    folder = root / '봇_선택폴더'; folder.mkdir()
+    source = folder / '광고@영화.mkv'; source.write_text('media')
+    outside = root / '광고@대상외.mkv'; outside.touch()
+    main.store.update(telegram_token=TELEGRAM_TOKEN, telegram_chat_id='42', telegram_commands=1, events='')
+    replies = []
+    def request(token, method, payload):
+        replies.append(payload)
+        return {'message_id': len(replies)}
+    bot = TelegramBot(main.store.config, request, main.validate_telegram_job, main.start_telegram_job, main.store.log)
+    bot.context = main.telegram_identity(main.store.config())
+    for i, text in enumerate(['/change', '광고@', 'null', '/' + folder.name, '예'], 100):
+        bot.handle({'message': {'message_id': i, 'chat': {'id': 42, 'type': 'private'}, 'from': {'id': 42}, 'text': text}})
+        if text != '예': assert source.exists() and not (folder / '영화.mkv').exists()
+    assert wait_job(client)['renamed'] == 1
+    assert (folder / '영화.mkv').read_text() == 'media' and outside.exists()
+    assert '작업을 시작했습니다' in replies[-1]['text']
+    assert any('Telegram 대화에서 확인한 작업 시작' in row['message'] for row in main.store.logs())
+
+
+def test_telegram_job_rechecks_identity_and_folder_at_confirmation(client, service):
+    main.store.update(telegram_token=TELEGRAM_TOKEN, telegram_chat_id='42', telegram_commands=1)
+    expected = main.telegram_identity(main.store.config())
+    main.store.update(telegram_commands=0)
+    with pytest.raises(ValueError, match='설정이 변경'):
+        main.start_telegram_job({'folder': '', 'find': 'ad_', 'replace': ''}, expected)
+    main.store.update(telegram_commands=1)
+    with pytest.raises(ValueError, match='폴더 경로'):
+        main.start_telegram_job({'folder': '../outside', 'find': 'ad_', 'replace': ''}, expected)
 
 
 @pytest.mark.parametrize('failed_channel', [None, 'discord', 'telegram'])
