@@ -381,12 +381,51 @@ def test_telegram_command_settings_require_private_chat(client, chat_id):
     assert result.status_code == 400 and not main.store.config()['telegram_commands']
 
 
-def test_telegram_command_setting_can_enable_and_clear_credentials(client):
+def test_telegram_command_setting_can_enable_and_clear_credentials(client, monkeypatch):
+    monkeypatch.setattr(main.notifications, 'submit', lambda *args: None)
     assert client.put('/api/settings', json={'username': 'admin', 'telegram_token': TELEGRAM_TOKEN,
         'telegram_chat_id': '42', 'telegram_commands': True}).status_code == 200
     assert client.get('/api/settings').json()['telegram_commands'] is True
     assert client.put('/api/settings', json={'username': 'admin', 'telegram_token': '', 'telegram_chat_id': ''}).status_code == 200
     assert client.get('/api/settings').json()['telegram_commands'] is False
+
+
+def test_telegram_setup_notice_only_on_command_configuration_changes(client, monkeypatch):
+    sent = []
+    monkeypatch.setattr(main.notifications, 'submit', lambda fn, *args: fn(*args))
+    monkeypatch.setattr(main, 'send_telegram', lambda *args: sent.append(args))
+
+    def save(**values):
+        assert client.put('/api/settings', json={'username': 'admin', **values}).status_code == 200
+
+    save(telegram_token=TELEGRAM_TOKEN, telegram_chat_id='42', telegram_commands=False)
+    assert not sent
+    save(telegram_commands=True)
+    assert len(sent) == 1 and sent[-1][:2] == (TELEGRAM_TOKEN, '42')
+    assert '봇 명령 사용 준비' in sent[-1][2]
+    save(telegram_commands=True)
+    save(events=['complete'])
+    save(password='new-password-123')
+    assert len(sent) == 1
+    save(telegram_chat_id='43')
+    assert len(sent) == 2 and sent[-1][1] == '43'
+    save(telegram_token=TELEGRAM_TOKEN + 'x')
+    assert len(sent) == 3 and sent[-1][0] == TELEGRAM_TOKEN + 'x'
+    save(telegram_commands=False)
+    assert len(sent) == 3
+    save(telegram_commands=True)
+    assert len(sent) == 4
+
+
+def test_telegram_setup_notice_failure_does_not_fail_saved_settings(client, monkeypatch):
+    monkeypatch.setattr(main.notifications, 'submit', lambda fn, *args: fn(*args))
+    def fail(*args):
+        raise ValueError('network')
+    monkeypatch.setattr(main, 'send_telegram', fail)
+    assert client.put('/api/settings', json={'username': 'admin', 'telegram_token': TELEGRAM_TOKEN,
+        'telegram_chat_id': '42', 'telegram_commands': True}).status_code == 200
+    assert main.store.config()['telegram_commands'] == 1
+    assert any('Telegram 설정 완료 알림 전송 실패' in row['message'] for row in main.store.logs())
 
 
 def test_command_mode_chat_discovery_uses_polling_cache_without_another_consumer(client, monkeypatch):

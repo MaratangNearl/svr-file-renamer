@@ -235,6 +235,10 @@ def save_settings(body: Settings, request: Request, current=Depends(session)):
                 if token != request.cookies.get('session'):
                     sessions.pop(token)
         store.log('info', '관리자 설정 저장')
+        previous = telegram_identity(config)
+        configured = telegram_identity({**config, **updates})
+        if configured and (not previous or configured[:2] != previous[:2]):
+            notifications.submit(notify_telegram_setup, configured[0], configured[1])
         return {'ok': True}
 
 
@@ -328,6 +332,14 @@ def send_telegram(token, chat_id, message):
     validate_telegram(token, chat_id)
     telegram_request(token, 'sendMessage', {'chat_id': chat_id, 'text': message[:1900],
                                           'link_preview_options': {'is_disabled': True}})
+
+
+def notify_telegram_setup(token, chat_id):
+    try:
+        send_telegram(token, chat_id,
+                      '봇 명령 사용 준비가 완료됐습니다. /change로 시작하세요. /help로 사용법을 볼 수 있습니다.')
+    except Exception:
+        store.log('error', 'Telegram 설정 완료 알림 전송 실패 (봇 토큰, 채팅 ID, 권한 또는 네트워크를 확인하세요.)')
 
 
 def notify(event, message):

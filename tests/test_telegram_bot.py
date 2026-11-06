@@ -213,6 +213,21 @@ def test_polling_deduplicates_updates_before_handling(bot):
     assert received == [7] and bot.offset == 8
 
 
+def test_startup_and_account_reconnect_never_send_readiness_messages(bot):
+    bot.context = None
+    bot.poll_once()
+    bot.poll_once()
+    bot.test_config['password'] = 'new-hash'
+    bot.poll_once()
+    bot.test_config['username'] = 'new-admin'
+    bot.poll_once()
+    bot.context = None  # A restarted worker bootstraps the saved configuration again.
+    bot.poll_once()
+    assert bot.context == identity(bot.test_config)
+    assert not bot.sent
+    assert all(method != 'sendMessage' for method, _ in bot.requests)
+
+
 def test_reply_failure_after_launch_never_repeats_job(bot):
     summary(bot)
     original = bot.request

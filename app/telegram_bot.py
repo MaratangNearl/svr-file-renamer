@@ -100,7 +100,6 @@ class TelegramBot:
             for update in updates:
                 self.remember(update)
                 self.offset = max(self.offset, update['update_id'] + 1)
-            self.send('봇 명령 사용 준비가 완료됐습니다. /change로 시작하세요. /help로 사용법을 볼 수 있습니다.')
             return
         updates = self.request(context[0], 'getUpdates', {'offset': self.offset, 'limit': 100, 'timeout': 5})
         for update in updates:
